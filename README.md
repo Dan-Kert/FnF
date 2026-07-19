@@ -33,4 +33,3 @@
 * **IvanAlmighty** - Misc UI Design
 * **Kawaisprite** - Musician
 * **BassetFilms** - Music for "Monster", Additional Character Design
-* 
