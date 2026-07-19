@@ -1,86 +1,146 @@
-#!/usr/bin/env bash
+name: Multiplatform Game Build
 
-set -euo pipefail
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
-TARGET="${1:-linux}"
+env:
+  HAXE_VERSION: 4.3.4
 
-if [ ! -f hmm.json ]; then
-  echo "Error: hmm.json not found in $(pwd). This script expects to run from the repo root." >&2
-  exit 1
-fi
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
 
-if [ "$TARGET" = "linux" ] || [ "$TARGET" = "android" ]; then
-  echo "Installing system dependencies and 32-bit support..."
-  
-  sudo dpkg --add-architecture i386
-  sudo apt-get update -qq
- 
-  sudo apt-get install -y --no-install-recommends \
-    build-essential cmake \
-    gcc-multilib g++-multilib \
-    libc6-dev-i386 \
-    libbsd-dev libbsd-dev:i386 \
-    libdbus-1-dev libdbus-1-dev:i386 \
-    libvlc-dev libvlccore-dev libvlccore9 \
-    libasound2-dev libpulse-dev \
-    libudev-dev libxkbcommon-dev \
-    libx11-dev libx11-dev:i386 \
-    libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
-    libxxf86vm-dev libxss-dev \
-    libgl1-mesa-dev libgl1-mesa-dev:i386 libglu1-mesa-dev \
-    libdrm-dev libgbm-dev libegl1-mesa-dev
-fi
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-rm -rf .haxelib
-mkdir -p .haxelib
-haxelib --never newrepo
+      - name: Setup Haxe
+        uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
 
-git config --global advice.detachedHead false
+      - name: Cache haxelib dependencies
+        uses: actions/cache@v4
+        with:
+          path: .haxelib
+          key: haxelib-v2-${{ matrix.os }}-${{ env.HAXE_VERSION }}-${{ hashFiles('hmm.json') }}
 
-echo "Installing FunkinCrew's patched haxelib & hmm..."
-haxelib --global git haxelib https://github.com/FunkinCrew/haxelib.git --quiet
-haxelib --global git hmm https://github.com/FunkinCrew/hmm.git --quiet
+      - name: Install Dependencies & Rebuild Tools
+        shell: bash
+        run: |
+          TARGET=linux
+          if [ "${{ matrix.os }}" = "windows-2022" ]; then
+            TARGET=windows
+          fi
+          bash .github/scripts/install-deps.sh "$TARGET"
 
-echo "Reformatting haxelib repository for patched haxelib..."
-haxelib --always fixrepo
+      - name: Compile Game
+        shell: bash
+        run: |
+          haxelib run lime build ${{ matrix.os == 'windows-2022' && 'windows' || 'linux' }} -release
 
-echo "Installing dependencies via hmm (hmm.json)..."
-haxelib --global run hmm install -q
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Funkin-${{ matrix.os }}
+          path: export/release/**
 
-haxelib set hxcpp git --always
+  build-android:
+    name: Build for Android
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-echo "Compiling hxcpp run stub (tools/run)..."
-(
-  cd .haxelib/hxcpp/git/tools/run
-  haxe compile.hxml
-)
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
-echo "Compiling hxcpp tools (tools/hxcpp)..."
-(
-  cd .haxelib/hxcpp/git/tools/hxcpp
-  haxe compile.hxml
-)
+      - name: Setup Android NDK & SDK
+        uses: android-actions/setup-android@v3
 
-echo "Setting up Lime..."
-haxelib run lime setup -y
+      - name: Setup NDK (r21e)
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r21e
 
-echo "Forcing hxcpp to use the git-installed (FunkinCrew fork) version..."
-haxelib set hxcpp git --always
+      - name: Setup Haxe
+        uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
 
-if [ "$TARGET" = "android" ]; then
-  mkdir -p "$HOME/.lime"
-  cat > "$HOME/.lime/config.xml" << EOF
-<xml>
-  <set name="ANDROID_SETUP" value="true" />
-  <set name="ANDROID_SDK" value="$ANDROID_HOME" />
-  <set name="ANDROID_NDK_ROOT" value="$ANDROID_NDK_HOME" />
-</xml>
-EOF
-  echo "Rebuilding Lime host (linux) ndll for asset packaging tools..."
-  haxelib run lime rebuild linux
-  echo "Rebuilding Lime Android ndll..."
-  haxelib run lime rebuild android
-else
-  echo "Rebuilding Lime $TARGET ndll..."
-  haxelib run lime rebuild "$TARGET"
-fi
+      - name: Cache haxelib dependencies
+        uses: actions/cache@v4
+        with:
+          path: .haxelib
+          key: haxelib-android-v2-${{ env.HAXE_VERSION }}-${{ hashFiles('hmm.json') }}
+
+      - name: Install Dependencies & Build Android
+        shell: bash
+        run: bash .github/scripts/install-deps.sh android
+
+      - name: Compile APK
+        shell: bash
+        run: |
+          haxelib run lime build android -release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Funkin-Android
+          path: export/**/*.apk
+
+  build-html5:
+    name: Build for HTML5 (Web)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Haxe
+        uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
+
+      - name: Cache haxelib dependencies
+        uses: actions/cache@v4
+        with:
+          path: .haxelib
+          key: haxelib-html5-v2-${{ env.HAXE_VERSION }}-${{ hashFiles('hmm.json') }}
+
+      - name: Install Dependencies
+        shell: bash
+        run: bash .github/scripts/install-deps.sh linux
+
+      - name: Compile HTML5
+        shell: bash
+        run: haxelib run lime build html5 -release
+
+      - name: Zip HTML5 Build
+        shell: bash
+        run: |
+          cd export/release/html5/bin
+          zip -r "$GITHUB_WORKSPACE/Funkin-HTML5.zip" .
+
+      - name: Upload HTML5 ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Funkin-HTML5
+          path: Funkin-HTML5.zip
